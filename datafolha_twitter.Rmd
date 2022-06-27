@@ -1,0 +1,572 @@
+---
+title: "Analise presidenciáveis ano novo"
+author: "Fernando Almeida Barbalho"
+date: "09/01/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(tidytext)
+
+#Carrega os dados com os twittes que citam os presidenciáveis
+
+load("~/Github/presidenciaveis/tweets_presidenciaveis.RData")
+
+
+#Função que gera um dataframe com as hashtags associadas aos twittes onde aparecem os candidatos
+analise_hashtags<- function(.data, n=NULL){
+  
+  library(purrr)
+  
+  hashtags<- .data$hashtags
+  
+  
+  keywords<-
+    map_dfr(1:length(hashtags), function(inc){
+      
+      #print(inc)
+      if ( !is.na(hashtags[[inc]]) ){
+        #print(hashtags[[inc]])
+        map_dfr(1:NROW(hashtags[[inc]]), function(inc_int){
+          #print(hashtags[[inc]][inc_int])
+          tibble(hashtag= hashtags[[inc]][inc_int])
+          
+        })
+      }
+    })
+  
+  
+  analise_keywords<-
+    keywords %>%
+    mutate(hashtag= str_to_lower(hashtag)) %>%
+    group_by(hashtag) %>%
+    summarise(
+      quantidade = n()
+    )
+  
+  if (!is.null(n)){
+    
+    analise_keywords<-
+      analise_keywords %>%
+      slice_max(quantidade, n=n)
+    
+    
+  }
+  
+  .data<-analise_keywords
+  
+  .data 
+  
+}
+
+
+
+#associação de mensagens positivas, negativas e neutras aos candidatos a uma amostra das mensagens
+
+associa_tipo_mensagem <- function(.data, n, tags_positivas, tags_negativas, usuarios_noticias=NULL, tipo=1, nome_arquivo=NULL, delim=",", seed=1972){
+  
+  
+  .data<-
+    .data %>%
+    mutate(tipo_mensagem = case_when(
+      tolower(hashtags) %in% tags_positivas ~ "positivo",
+      tolower(hashtags) %in% tags_negativas ~ "negativo",
+      screen_name %in% usuarios_noticias ~ "noticia"
+    )) %>%
+    select(status_id, screen_name, text,tipo_mensagem, hashtags)
+  
+  set.seed(seed)
+  
+  if (tipo == 1){
+    
+    .data<-
+      .data %>%
+      slice_sample(n=n)
+    
+    #seleciona uma amostra das mensagens e sugere as primeiras definições do tipo de mesnagem a partir das hashtags e usuários
+    
+    
+  } else{
+    
+    #seleciona uma amostra das mensagens e sugere as primeiras definições do tipo de mesnagem a partir das hashtags e usuários
+    .data<-
+      .data %>%
+      filter(!is.na(tipo_mensagem)) %>%
+      slice_sample(n=n)
+  }
+  
+  
+  if (!is.null(nome_arquivo)){
+    .data%>%
+      readr::write_delim(nome_arquivo, delim = delim,  )
+  }
+  
+  .data
+  
+}
+
+
+
+
+
+
+
+
+
+#################Processamento de tweets
+
+processa_tweets<- function(.data){
+  .data<- 
+    .data %>%
+    select(status_id, screen_name, tipo_mensagem, text) %>%
+    unnest_tweets(word,text, strip_url = TRUE)%>%
+    dplyr::filter(!str_detect(word,"#"),
+                  !str_detect(word,"@"),
+                  !str_detect(word, "[^[:graph:][:space:]]"))
+  
+  .data$word<- abjutils::rm_accent(.data$word)
+  
+  palavras_unicas_usuario<- 
+    .data %>%
+    group_by(screen_name, word) %>%
+    summarise(
+      quantidade = n()
+    ) %>%
+    filter(quantidade == 1) %>%
+    select(screen_name, word) %>%
+    ungroup()
+  
+  .data<-   
+    .data %>%
+    inner_join(palavras_unicas_usuario)
+  
+  library(stopwords) 
+  
+  library(tibble)
+  
+  stopword <- as_tibble(stopwords::stopwords("pt")) 
+  stopword <- rename(stopword, word=value)
+  .data <- anti_join(.data, stopword, by = 'word')
+  
+  .data
+  
+}
+
+
+###########Term frequency (tf)
+
+frequencia_termos<-function(.data){
+  
+  
+  word_count <- count(.data, word, sort = TRUE)
+  
+  tipo_count <-  .data %>% 
+    count(tipo_mensagem, word, sort = TRUE)
+  
+  .data<- tipo_count 
+  .data
+  
+  
+}
+
+
+
+########## Term frequency and inverse document frequency (tf-idf)
+
+tabela_tf_idf<-  function(.data){
+  
+  library(forcats)
+  
+  tabela <- .data %>%
+    count(tipo_mensagem, word, sort = TRUE) %>%
+    bind_tf_idf(word, tipo_mensagem, n) %>%
+    mutate(word = fct_reorder(word, tf_idf)) %>%
+    mutate(tipo_mensagem = factor(tipo_mensagem, 
+                                  levels = c("negativo",
+                                             "positivo",
+                                             "noticias")))
+  
+  graph<-
+  tabela %>% 
+    group_by(tipo_mensagem) %>% 
+    top_n(15, tf_idf) %>% 
+    ungroup() %>%
+    mutate(word = reorder(word, tf_idf)) %>%
+    ggplot(aes(word, tf_idf, fill = tipo_mensagem)) +
+    scale_y_continuous(expand = c(0, 0)) +
+    geom_col(show.legend = FALSE) +
+    labs(x = NULL, y = NULL) +
+    facet_wrap(~tipo_mensagem, ncol = 3, scales = "free") +
+    coord_flip() +
+    theme_classic(base_size = 12) +
+    labs(fill= "Tipo Mensagem", 
+         x= NULL, 
+         y= NULL) +
+    theme(plot.title = element_text(lineheight=.8, face="bold"),
+          axis.title = element_blank(),
+          axis.text.x = element_blank()) +
+    scale_fill_viridis(discrete = TRUE)  
+  
+  list(tabela= tabela,graph= graph )
+  
+  
+  
+  
+}
+
+
+
+
+
+### Preparação das base de ML
+prepara_base_ml<-  function(.data){
+  
+  
+  library(caret)
+  library(tidyr)
+  
+  pml_train_trabalho<-
+    .data %>%
+    group_by(status_id, tipo_mensagem, word) %>%
+    summarise(
+      quantidade = n()
+    ) %>%
+    ungroup() %>%
+    pivot_wider(names_from = word, values_from = quantidade)
+  
+  
+  pml_train_trabalho[is.na(pml_train_trabalho)]<-0  
+  
+  library(janitor)
+  
+  pml_train_model <- pml_train_trabalho[,-1]
+  
+  status_id_model<-  pml_train_trabalho$status_id
+  
+  colnames(pml_train_model) <- make.names(colnames(pml_train_model))
+  #pml_train_model<- janitor::clean_names(pml_train_model)
+  
+  pml_train_model<- pml_train_model[,substr(names(pml_train_model),1,2)!="X."]
+  
+  .data= list(status_id_model= status_id_model , pml_train_model = pml_train_model)
+  
+}
+
+
+########### decision tree para todos os elementos
+
+cria_arvore_decisao<- function(.data, seed= 1972){
+  if (class(.data)=="list"){
+    .data <- .data$pml_train_model
+  }
+  
+  control_dt <- trainControl(method="cv")
+  
+  set.seed(seed)
+  
+  
+  dt_model <- train(tipo_mensagem~., data=.data, method="rpart",  trControl=control_dt)
+  
+  dt_model
+  
+}
+
+
+########### gráfico da decision tree para todos os elementos
+grafico_arvore_decisao<-function(.data){
+  
+  library(rattle)
+  fancyRpartPlot(.data$finalModel)
+
+}
+
+
+```
+
+
+# Análise dos presidenciávies no twitter
+
+A última semana de 2021 foi marcada pela tragédia das enchentes na Bahia. Esse fato gerou muitas discussões no campo da política principalmente no debate em torno do papel do presidente Jair Bolsonaro em relação ao que estava ocorrendo. O ambiente do twitter, que já não era dos mais pacífico,s ficou ainda mais beligerante na véspera do ano eleitoral. Quem usa a rede social constatou com facilidade a proliferação de mensagens contra ou a favor do presidente ao mesmo tempo em que se percebia a maior frequência de manifestações de felicitações para o ano novo acompanhadas de indicação de votos nos principais presidenciáveis. Essa situação peculiar despertou o interesse de se tentar medir como estava a imagem dos principais presidenciáveis na visão dos usuários do twitter no encerramento do pré ano eleitoral. O que se buscou fazer aqui foi fazer essa medição a partir da análise das mensgens associadas às hashtags que apontam a rivalidade de posições para cada um dos candidatos.
+
+No início da manhã do dia 29/12/2021 fiz um levantamento  de até 18000 mensagens de twitter que incluíram o nome dos principais candidatos. A forma de coleta usada, a partir da API livre do twitter, permite capturar mensagens de até aproximadamente sete dias anteriores à requisição dos dados. Só para deixar claro, o objetivo seria ter 18000 mensagens para cada candidato. Na prática isso não chegou a ocorrer já que algumas candidaturas não chegaram a atingir esse número. Logo abaixo há um resumo número de mensagens associadas a princípios aos nomes de cada um dos candidatós e as marcações de data e hora da primeira e última mensagem.
+
+```{r}
+library(RColorBrewer)
+
+lula$candidato <- "Lula"
+bolsonaro$candidato<- "Bolsonaro"
+moro$candidato <- "Moro"
+ciro$candidato <- "Ciro"
+doria$candidato <- "Doria"
+
+lula  %>%
+  bind_rows(bolsonaro,
+            moro,
+            ciro,
+            doria) %>%
+  mutate(data_postagem = lubridate::date(as.Date(created_at))  ) %>%
+  group_by(candidato, data_postagem) %>%
+  summarise(
+    quantidade = n()
+  ) %>%
+  ggplot() +
+  geom_col(aes(x=data_postagem, y= quantidade, fill= candidato))+
+  theme_light() +
+  scale_fill_brewer(palette = "Accent") +
+  labs(x= NULL, y=NULL)
+
+  
+```
+
+
+
+```{r}
+resumo<- 
+  tibble(candidato= "Lula", num_mensagem = NROW(lula), inicio= min(lula$created_at), fim=max(lula$created_at)) %>%
+  bind_rows(
+    tibble(candidato= "Bolsonaro", num_mensagem = NROW(bolsonaro), inicio= min(bolsonaro$created_at), fim=max(bolsonaro$created_at)),
+    tibble(candidato= "Moro", num_mensagem = NROW(moro), inicio= min(moro$created_at), fim=max(moro$created_at)),
+    tibble(candidato= "Ciro", num_mensagem = NROW(ciro), inicio= min(ciro$created_at), fim=max(ciro$created_at)),
+    tibble(candidato= "Doria", num_mensagem = NROW(doria), inicio= min(doria$created_at), fim=max(doria$created_at))
+  )
+
+
+
+
+library(kableExtra)
+
+kableExtra::kable(resumo) %>% kable_styling()
+  
+```
+
+
+
+Com as mensagens em mãos passou-se a investigar as dez hashtags mais populares por candidatos. Daí fez-se um julgamento daquelas que seriam à priori favoráveis e aquelas que seriam contra os tais candidatos. Percebeu-se então que apenas os três primeiros candidatos na tabela acima haviam hashtags figuradas entre as 10 mais frequentes que claramente indicavam mensagens positivas e negativas. Dessa forma Ciro e Dória não chegaram a ser avaliados já que nesse ranking só havia hashtags aparentemente neutras ou positivas e a metodologia utilizada exige a classificação binária positiva x negativa a priori.
+
+A próxima etapa foi executar os procedimentos de análises relacionados à importância dos termos na definição se uma mensagem é positiva ou negativa. Usou-se duas abordagens para isso: a TF-IDF que mostra a importância dos termos únicos para cada uma classes (positiva ou negativa) e a árvore de decisão que indica como as palavras se organizam hierarquicamente na definição da classe da mensagem. Ao se realizar essa última etapa perdeu-se mais um candidato. Tanto a análise TF_IDF como a árvore de decisão não apresentaram resultados robustos, possivelmente pela pouca quantidade de mensagens relevantes para essas classificações.
+
+
+## Análise do Bolsonaro
+
+Bolsonaro foi o candidato mais associados a hashtags com um número muito mais elevado do que qualquer outro candidato, incluindo Lula que está na liderança da corrida presidencial de acordo com as pesquisas mais recentes. Como veremos, porém, isso não necessariamente é uma boa notícia para o presidente.
+
+
+### Análise das hashtags
+
+
+```{r}
+library(ggplot2)
+
+analise_bolsonaro<- analise_hashtags(bolsonaro,10)
+
+analise_bolsonaro%>%
+  mutate(hashtag = reorder(hashtag, quantidade)) %>%
+  ggplot()+
+  geom_col(aes(x=quantidade, y=hashtag)) +
+  theme_light()+
+  theme(axis.title.y = element_blank())
+```
+
+Do ranking inicial selecionei as hashtags indicadas na figura abaixo que parecem estar mais associada com pouca margem de dúvidas a mensagens positivas ou negativas ao candidato Bolsonaro.
+
+```{r}
+
+library(viridis)
+
+tags_positivas <- analise_bolsonaro$hashtag[c(2,4,7,8,10)]
+tags_negativas <- analise_bolsonaro$hashtag[c(1,6)]
+  
+
+
+analise_bolsonaro%>%
+  filter(hashtag %in% c(tags_positivas, tags_negativas)) %>%
+  mutate(hashtag = reorder(hashtag, quantidade)) %>%
+  mutate(classe = ifelse(hashtag %in% tags_positivas,"Positivo", "Negativo")) %>%
+  ggplot()+
+  geom_col(aes(x=quantidade, y=hashtag, fill= classe)) +
+  scale_fill_viridis(discrete = TRUE)+
+  theme_light()+
+  theme(axis.title.y = element_blank())
+```
+
+Se resumirmos as hastags entre as duas classes, percebe-se uma maioria de mensagens com tom negativo em relação ao presidente. Veja no gráfico abaixo.
+
+```{r}
+analise_bolsonaro%>%
+  filter(hashtag %in% c(tags_positivas, tags_negativas)) %>%
+  mutate(hashtag = reorder(hashtag, quantidade)) %>%
+  mutate(classe = ifelse(hashtag %in% tags_positivas,"Positivo", "Negativo")) %>%
+  ggplot()+
+  geom_col(aes(x=quantidade, y=classe, fill= classe), show.legend = FALSE) +
+  scale_fill_viridis(discrete = TRUE)+
+  theme_light()+
+  theme(axis.title.y = element_blank())
+```
+
+
+
+### Análise tf-IDF
+
+Na análise tf-IDF busca-se entender as palavras que estão associadas a apenas uma das classes e que são mais relevantes dentro do contexto de análise. Para se chegar a essa análise é necessário que primeiro se quebre as mensagens nas palavras componentes e em seguida se faça uma limpeza para ficar apenas as palavras que são relevantes. Dessa forma se retira palavras como preposições, artigos e pronomes. Optou-se ainda por preservar apenas as palavras que são únicas por usuários. Isso permitiu excluir as sequências de palavaras que formam *floods* de mensagens. Vejamos o resultado para o caso do Bolsonaro
+
+```{r}
+#Para fazer tf_idf (caminho completo)
+
+tf_idf_bolsonaro<- 
+  associa_tipo_mensagem(bolsonaro, 
+                        n= 3300,
+                        tags_positivas = tags_positivas, 
+                        tags_negativas = tags_negativas,
+                        #usuarios_noticias = imprensa,
+                        tipo =2) %>%
+  processa_tweets() %>%
+  tabela_tf_idf()
+
+#Para mostrar o gráfico tf_idf (caminho curto)
+
+tf_idf_bolsonaro$graph
+
+```
+
+Pelo gráfico acima fica claro que a forma como o presidente aproveitou suas férias ao final de 2021 não repercutiu bem entre os usuários do twitter. Observa-se isso na relevância da palavra **SC**, sigla de Santa Catarina, o estado onde ele esteve de férias. Os seus hábitos de diversão também não foram muito bem visto. Vê-se isso pela relevância das palavras associadas a **jet-ski**, ou com o verbo **passeando**. Há referências importantes ainda para as palavras **mamata**, **impeachment** e **crise** que dá uma boa medida do estado de espírito dos opositores do presidente.
+
+Pelo lado positivo destaca-se a aposta na reeleição do presidente e o cumprimento de um segundo mandato até *2026*. É importante destacar a palavra *olavo* entre as mais importantes.  Aqui trata-se da disputa e aparentemente rompimento de Bolsonaro com Olavo de Carvalho, a quem se atribui ser um dos principais mentores do presidente. Uma série de palavras estão associadas ás rivalidades construídas pelo alinhamento ideológico dos eleitores de Bolsonaro. Isso está presente nas palavras **petista**, **comunistas** e **sistema**. Um elemento curioso é a presença da palavra **pr** um quase neologismo no vocabulário político no Brasil. Abreviação de Presidência da República. Provavelmente emprestado pela inspiração no ex-potus Donald Trump. Por fim, uma outra coisa interessante é a presença do número **22** aqui é tanto uma referência ao novo número de identificação do presidente na urna, como também o ano das eleições. 
+
+### Árvore de decisão 
+
+A amálise de árvore de decisão passa pelos mesmos pré-processamentos da análise TF-IDF buscando assim garantir um resultado mais compatível com o uso orgânico do twitter. Vejamos como se organiza hirarquicamente as palavras na definição das classes para o caso de Bolsonaro.
+
+```{r fig.height= 8}
+#para gerar a base do modelo ml (caminho completo)
+
+modelo_ml_bolsonaro<-
+  associa_tipo_mensagem(bolsonaro, 
+                        n= 3300,
+                        tags_positivas = tags_positivas, 
+                        tags_negativas = tags_negativas,
+                        #usuarios_noticias = imprensa,
+                        tipo =2) %>%
+  processa_tweets()%>%
+  prepara_base_ml() 
+
+#para gerar o modelo ml (caminho curto)
+
+dt_bolsonaro<-
+modelo_ml_bolsonaro %>%
+  cria_arvore_decisao()
+
+#Para gerar a figura da dt (caminho curto)
+grafico_arvore_decisao(dt_bolsonaro)
+
+```
+
+Três palavras são importantes na anállise hierárquica dos twittes que citam Bolsonaro. A mais relevante é **férias**. Em 96% das mensagens a presença dessa palavra está associada à classe negativo. O que reforça a imagem negativa da última temporada de férias do presidente. A segunda palavra relevante também vai na mesma linha. Para todas as mensagens que não possuem a palavra férias e que possuem a palavra **vagabundo**, 95% delas não são favoráveis a Bolsonaro. Quando não existem as palavras **férias**, **vagabundo** e **2022**, surgem mais duas palavras relevantes. A primeira palavra é **esquerda**, com 92% das referências associadas a apoio ao presidente ^[esse número refere-se às mensagens que têm presente a palavra **esquerda** e ausência das palavras **férias**, **vagabundo** e **2022**]. Denota-se aí as rivalidades do universo ideológico dos seus apoiadores. A próxima palavra relevante na cadeia hierárquica é a palavra **2026** com 100% das referência associadas a mensagens de apoio ao presidente. Aqui repete-se o achado da análise TF-IDF. Na hierarquia das palavras somente nesse momento é que fica mais claro mensagens de apoio à reeleição de Bolsonaro. Por outro lado, é possível indicar que existe um ramo de mensagens positivas a Bolsonaro associado a palavra **2022**, no entatno a proporção de mensagens negativas é relativametne alta, em torno de 21% o que não permite cravar essa palavra como fortemente positiva ao presidente.      
+
+## Análise lula
+
+Como já adiantado anteriormente o número de mensagens associadas a hashtags e que citam Lula é bem menor do que o caso de Bolsonaro. Isso diminui a robustez das análises, mas ainda assim se consegue chegar a algumas conclusões interessantes.
+
+### Análise das hashtags
+
+
+```{r}
+analise_lula<- analise_hashtags(lula,10)
+
+analise_lula%>%
+  mutate(hashtag = reorder(hashtag, quantidade)) %>%
+  ggplot()+
+  geom_col(aes(x=quantidade, y=hashtag)) +
+  theme_light()+
+  theme(axis.title.y = element_blank())
+```
+
+Agora o ranking permanecendo apenas as hashtags que serão úteis
+
+```{r}
+tags_positivas<- analise_lula$hashtag[c(2,4,6,9)]
+tags_negativas<- analise_lula$hashtag[c(3,10)]
+
+analise_lula%>%
+  filter(hashtag %in% c(tags_positivas, tags_negativas)) %>%
+  mutate(hashtag = reorder(hashtag, quantidade)) %>%
+  mutate(classe = ifelse(hashtag %in% tags_positivas,"Positivo", "Negativo")) %>%
+  ggplot()+
+  geom_col(aes(x=quantidade, y=hashtag, fill= classe)) +
+  scale_fill_viridis(discrete = TRUE)+
+  theme_light()+
+  theme(axis.title.y = element_blank())
+```
+
+E agora as hashtags resumidas entre positivo e negativo, onde se percebe a predominância de mensagens na classe positiva .
+
+```{r}
+analise_lula%>%
+  filter(hashtag %in% c(tags_positivas, tags_negativas)) %>%
+  mutate(hashtag = reorder(hashtag, quantidade)) %>%
+  mutate(classe = ifelse(hashtag %in% tags_positivas,"Positivo", "Negativo")) %>%
+  ggplot()+
+  geom_col(aes(x=quantidade, y=classe, fill= classe), show.legend = FALSE) +
+  scale_fill_viridis(discrete = TRUE)+
+  theme_light()+
+  theme(axis.title.y = element_blank())
+```
+
+
+### Análise tf-IDF
+
+Veja abaixo a figura que traz o resumo das prinicpais palavras citadas unicamente para cada uma das classes
+```{r}
+#Para fazer tf_idf (caminho completo)
+
+tf_idf_lula<- 
+  associa_tipo_mensagem(lula, 
+                        n= 3300,
+                        tags_positivas = tags_positivas, 
+                        tags_negativas = tags_negativas,
+                        #usuarios_noticias = imprensa,
+                        tipo =2) %>%
+  processa_tweets() %>%
+  tabela_tf_idf()
+
+#Para mostrar o gráfico tf_idf (caminho curto)
+
+tf_idf_lula$graph
+
+
+```
+
+Do lado negativo, a palavra única mais fortemente associada a Lula é **vagabundo**. Ao contrário da presença dessa palavra na análise de Bolsonaro, aqui a conotação está mais próxima do processo de julgamento do ex-presidente que o levou à prisão. Não à toa pode-se analisar também nesse mesmo contexto as palavras **bandido**, **expresidiario** e **condenado**. Tal como na análise de Bolsonaro, palavras relacionadas a cortes ideológicos estão presentes e novamente com sentido negativo. Para esse caso temos **petista**, **comunista** e **comunistas**. Novamente o **22** aparece. No lado negativo dessa vez, indicando a preferência de parte dos leitores que publicaram hashtags contra Lula. A curiosidade aqui fica por conta de Ciro como segunda palavra no ranking negativo. Ao analisar os textos, se percebe que parte dos eleitores contra Lula também escrevem contra o ex-governador cearense.
+
+Do lado positivo as palavras são mais associadas com a campanha de Lula para as eleições de 2022. Isso aparece claramente na palavra mais importante do lado positivo. **Primeiro** aqui é uma referência à expectativa de que o candidato seja eleito já no primeiro turno. Outras palavras que marcam a expectativa de vitória de Lula também estão associadas à mensagens de encerramento de 2021: **feliz**, **ano**. Há ainda os termos que remetem a melhores tempos após as eleições: **reconstruir**, **esperança** e **democracia** 
+
+### Árvore de decisão 
+
+E agora a análise hierárquica da relação dos termos com as classes positiva e negativa
+
+```{r}
+#para gerar a base do modelo ml (caminho completo)
+
+modelo_ml_lula<-
+  associa_tipo_mensagem(lula, 
+                        n= 3300,
+                        tags_positivas = tags_positivas, 
+                        tags_negativas = tags_negativas,
+                        #usuarios_noticias = imprensa,
+                        tipo =2) %>%
+  processa_tweets() %>%
+  prepara_base_ml() 
+
+#para gerar o modelo ml (caminho curto)
+
+dt_lula<-
+modelo_ml_lula %>%
+  cria_arvore_decisao()
+
+#Para gerar a figura da dt (caminho curto)
+grafico_arvore_decisao(dt_lula)
+```
+
+A árvore de decisão gerada para Lula mostra três palavras importantes. A primeira é **ladrão**. A simples presença dessa palavra em uma mensagem leva a 95% das vezes a uma classificação negativa para Lula. Isso corrobora os achados na análise TF-IDF quando se tratou dos efeitos da prisão do ex-presidente. Quando não há **ladrão** na mensagem, a próxima palavra importante é **2022**. Aqui ao contrário do que ocorreu na análise sobre Bolsonaro, as eleições de 2022 são muito fortemente associadas a mensagens positivas, no caso, cerca de 94% dos tweets. A terceira palavra leva novamente ao lado negativo e mais uma vez para os processos que envolveram Lula. Nesse caso, para os textos que não têm as palavras ladrão e 2022, mas ocorre **cadeia**, percebe-se que 86% das situações são desfavoráveis a Lula.  
